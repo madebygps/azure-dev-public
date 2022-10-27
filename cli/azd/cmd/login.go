@@ -10,8 +10,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/azure/azure-dev/cli/azd/cmd/contracts"
 	"github.com/azure/azure-dev/cli/azd/internal"
+	"github.com/azure/azure-dev/cli/azd/pkg/contracts"
 	"github.com/azure/azure-dev/cli/azd/pkg/input"
 	"github.com/azure/azure-dev/cli/azd/pkg/output"
 	"github.com/azure/azure-dev/cli/azd/pkg/tools"
@@ -91,7 +91,7 @@ func (la *loginAction) Run(ctx context.Context) error {
 		}
 	}
 
-	var res contracts.LoginResult
+	res := contracts.LoginResult{}
 
 	if token, err := la.azCli.GetAccessToken(ctx); errors.Is(err, azcli.ErrAzCliNotLoggedIn) ||
 		errors.Is(err, azcli.ErrAzCliRefreshTokenExpired) {

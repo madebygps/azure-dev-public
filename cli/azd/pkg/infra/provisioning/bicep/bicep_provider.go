@@ -113,7 +113,10 @@ func (p *BicepProvider) State(
 			}
 
 			asyncContext.SetProgress(&StateProgress{Message: "Normalizing output parameters", Timestamp: time.Now()})
-			state.Outputs = p.createOutputParameters(deployment, azcli.CreateDeploymentOutput(armDeployment.Properties.Outputs))
+			state.Outputs = p.createOutputParameters(
+				deployment,
+				azcli.CreateDeploymentOutput(armDeployment.Properties.Outputs),
+			)
 
 			result := StateResult{
 				State: &state,
@@ -188,7 +191,6 @@ func (p *BicepProvider) Deploy(
 	return async.RunInteractiveTaskWithProgress(
 		func(asyncContext *async.InteractiveTaskContextWithProgress[*DeployResult, *DeployProgress]) {
 			done := make(chan bool)
-			var operations []azcli.AzCliResourceOperation
 
 			// Ensure the done marker channel is sent in all conditions
 			defer func() {
@@ -217,7 +219,6 @@ func (p *BicepProvider) Deploy(
 							continue
 						}
 
-						operations = progressReport.Operations
 						asyncContext.SetProgress(progressReport)
 
 						timer.Reset(regularDelay)
@@ -242,7 +243,6 @@ func (p *BicepProvider) Deploy(
 			)
 
 			result := &DeployResult{
-				Operations: operations,
 				Deployment: &deployment,
 			}
 
@@ -430,11 +430,11 @@ func (p *BicepProvider) purgeItems(
 	items []itemToPurge,
 	options DestroyOptions,
 ) error {
-	if !options.Purge() {
+	if len(items) > 0 && !options.Purge() {
 		var itemString string
-		itemsWarning := "\n\nThis operation will delete:"
+		var itemsWarning string
 		for _, v := range items {
-			if v.count != 0 {
+			if v.count > 0 {
 				if itemString != "" {
 					itemString = itemString + "/" + v.resourceType
 				} else {
@@ -443,7 +443,12 @@ func (p *BicepProvider) purgeItems(
 				itemsWarning = itemsWarning + fmt.Sprintf("\n				%d %s", v.count, v.resourceType)
 			}
 		}
-		itemsWarning = itemsWarning + fmt.Sprintf("\nThese %s have soft delete enabled "+
+
+		if len(itemsWarning) < 1 {
+			return nil
+		}
+
+		itemsWarning = "\n\nThis operation will delete:" + itemsWarning + fmt.Sprintf("\nThese %s have soft delete enabled "+
 			"allowing them to be recovered for a period "+
 			"of time after deletion. During this period, their names may not be reused.\n"+
 			"You can use argument --purge to skip this confirmation.\n\n", itemString)

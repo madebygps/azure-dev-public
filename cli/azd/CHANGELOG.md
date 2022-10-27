@@ -1,6 +1,33 @@
 # Release History
 
-## 0.3.0-beta.3 (Unreleased)
+## 0.3.0-beta.6 (Unreleased)
+
+## 0.3.0-beta.5 (2022-10-26)
+
+### Bugs Fixed
+
+- [[#979]](https://github.com/Azure/azure-dev/pull/979) Fix provisioning template with non string outputs.
+
+## 0.3.0-beta.4 (2022-10-25) **DEPRECATED**
+
+### Bugs Fixed
+
+- [[#979]](https://github.com/Azure/azure-dev/pull/979) Fix provisioning template with non string outputs.
+
+## 0.3.0-beta.3 (2022-10-21)
+
+### Features Added
+
+- [[#878]](https://github.com/Azure/azure-dev/pull/878) `azd down` supports purge of app configuration stores.
+
+### Bugs Fixed
+
+- [[#925]](https://github.com/Azure/azure-dev/pull/925) Fix issues where running `azd infra create` with `--output==json` would emit invalid JSON.  As part of this change, we now no longer emit multiple objects to `stdout` as part of an operation. Instead, progress messages are streamed in a structured way to `stderr`.
+
+### Other Changes
+
+- [[#691]](https://github.com/Azure/azure-dev/pull/691) Rearrange Terraform templates by extracting common resources and using these common modules.
+- [[#892]](https://github.com/Azure/azure-dev/pull/892) Simplify template bicep modules.
 
 ## 0.3.0-beta.2 (2022-10-05)
 

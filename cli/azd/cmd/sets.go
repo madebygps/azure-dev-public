@@ -11,6 +11,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/azure/azure-dev/cli/azd/cmd/actions"
 	"github.com/azure/azure-dev/cli/azd/internal"
+	"github.com/azure/azure-dev/cli/azd/pkg/account"
+	"github.com/azure/azure-dev/cli/azd/pkg/config"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment/azdcontext"
 	"github.com/azure/azure-dev/cli/azd/pkg/exec"
 	"github.com/azure/azure-dev/cli/azd/pkg/input"
@@ -47,9 +49,19 @@ func newConsoleFromOptions(
 	writer io.Writer,
 	cmd *cobra.Command,
 ) input.Console {
+	// NOTE: There is a similar version of this code in pkg/commands/builder.go that exists while we transition
+	// from the old plan of passing everything via a context to the new plan of wiring everything up explicitly.
+	//
+	// If you make changes to this logic here, also take a look over there to make the same changes.
+
 	isTerminal := cmd.OutOrStdout() == os.Stdout &&
 		cmd.InOrStdin() == os.Stdin && isatty.IsTerminal(os.Stdin.Fd()) &&
 		isatty.IsTerminal(os.Stdout.Fd())
+
+	// When using JSON formatting, we want to ensure we always write messages from the console to stderr.
+	if formatter != nil && formatter.Kind() == output.JsonFormat {
+		writer = cmd.ErrOrStderr()
+	}
 
 	return input.NewConsole(rootOptions.NoPrompt, isTerminal, writer, input.ConsoleHandles{
 		Stdin:  cmd.InOrStdin(),
@@ -104,6 +116,8 @@ var FormattedConsoleSet = wire.NewSet(
 )
 
 var CommonSet = wire.NewSet(
+	config.NewManager,
+	account.NewManager,
 	newAzdContext,
 	FormattedConsoleSet,
 	newCommandRunnerFromConsole,
@@ -228,3 +242,28 @@ var VersionCmdSet = wire.NewSet(
 	CommonSet,
 	newVersionAction,
 	wire.Bind(new(actions.Action), new(*versionAction)))
+
+var ConfigListCmdSet = wire.NewSet(
+	CommonSet,
+	newConfigListAction,
+	wire.Bind(new(actions.Action), new(*configListAction)))
+
+var ConfigGetCmdSet = wire.NewSet(
+	CommonSet,
+	newConfigGetAction,
+	wire.Bind(new(actions.Action), new(*configGetAction)))
+
+var ConfigSetCmdSet = wire.NewSet(
+	CommonSet,
+	newConfigSetAction,
+	wire.Bind(new(actions.Action), new(*configSetAction)))
+
+var ConfigUnsetCmdSet = wire.NewSet(
+	CommonSet,
+	newConfigUnsetAction,
+	wire.Bind(new(actions.Action), new(*configUnsetAction)))
+
+var ConfigResetCmdSet = wire.NewSet(
+	CommonSet,
+	newConfigResetAction,
+	wire.Bind(new(actions.Action), new(*configResetAction)))
