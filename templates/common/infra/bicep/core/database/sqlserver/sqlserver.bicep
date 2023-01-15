@@ -1,23 +1,20 @@
-param environmentName string
+param name string
 param location string = resourceGroup().location
+param tags object = {}
 
 param appUser string = 'appUser'
-param dbName string
+param databaseName string
 param keyVaultName string
 param sqlAdmin string = 'sqlAdmin'
-param sqlConnectionStringKey string = 'AZURE-SQL-CONNECTION-STRING'
+param connectionStringKey string = 'AZURE-SQL-CONNECTION-STRING'
 
 @secure()
 param sqlAdminPassword string
 @secure()
 param appUserPassword string
 
-var abbrs = loadJsonContent('../../../abbreviations.json')
-var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
-var tags = { 'azd-env-name': environmentName }
-
-resource sqlServer 'Microsoft.Sql/servers@2022-02-01-preview' = {
-  name: '${abbrs.sqlServers}${resourceToken}'
+resource sqlServer 'Microsoft.Sql/servers@2022-05-01-preview' = {
+  name: name
   location: location
   tags: tags
   properties: {
@@ -29,14 +26,14 @@ resource sqlServer 'Microsoft.Sql/servers@2022-02-01-preview' = {
   }
 
   resource database 'databases' = {
-    name: dbName
+    name: databaseName
     location: location
   }
 
   resource firewall 'firewallRules' = {
     name: 'Azure Services'
     properties: {
-      // Allow all clients 
+      // Allow all clients
       // Note: range [0.0.0.0-0.0.0.0] means "allow all Azure-hosted clients only".
       // This is not sufficient, because we also want to allow direct access from developer machine, for debugging purposes.
       startIpAddress: '0.0.0.1'
@@ -46,7 +43,7 @@ resource sqlServer 'Microsoft.Sql/servers@2022-02-01-preview' = {
 }
 
 resource sqlDeploymentScript 'Microsoft.Resources/deploymentScripts@2020-10-01' = {
-  name: 'script-${resourceToken}'
+  name: '${name}-deployment-script'
   location: location
   kind: 'AzureCLI'
   properties: {
@@ -65,7 +62,7 @@ resource sqlDeploymentScript 'Microsoft.Resources/deploymentScripts@2020-10-01' 
       }
       {
         name: 'DBNAME'
-        value: dbName
+        value: databaseName
       }
       {
         name: 'DBSERVER'
@@ -117,9 +114,9 @@ resource appUserPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2022-07-01' = 
 
 resource sqlAzureConnectionStringSercret 'Microsoft.KeyVault/vaults/secrets@2022-07-01' = {
   parent: keyVault
-  name: sqlConnectionStringKey
+  name: connectionStringKey
   properties: {
-    value: '${azureSqlConnectionString}; Password=${appUserPassword}'
+    value: '${connectionString}; Password=${appUserPassword}'
   }
 }
 
@@ -127,5 +124,6 @@ resource keyVault 'Microsoft.KeyVault/vaults@2022-07-01' existing = {
   name: keyVaultName
 }
 
-var azureSqlConnectionString = 'Server=${sqlServer.properties.fullyQualifiedDomainName}; Database=${sqlServer::database.name}; User=${appUser}'
-output sqlConnectionStringKey string = sqlConnectionStringKey
+var connectionString = 'Server=${sqlServer.properties.fullyQualifiedDomainName}; Database=${sqlServer::database.name}; User=${appUser}'
+output connectionStringKey string = connectionStringKey
+output databaseName string = sqlServer::database.name

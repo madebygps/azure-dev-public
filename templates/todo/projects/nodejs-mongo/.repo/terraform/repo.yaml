@@ -20,12 +20,12 @@ repo:
         to: ./modules/applicationinsights
         patterns:
           - "**/*.tf"
-      
+
       - from: ../../../../../../common/infra/terraform/core/monitor/loganalytics
         to: ./modules/loganalytics
         patterns:
           - "**/*.tf"
-      
+
       - from: ../../../../../../common/infra/terraform/core/security/keyvault
         to: ./modules/keyvault
         patterns:
@@ -45,7 +45,17 @@ repo:
         to: ./modules/cosmos
         patterns:
           - "**/*.tf"
-   
+
+      - from: ../../../../../../common/infra/terraform/core/gateway/apim
+        to: ./modules/apim
+        patterns:
+          - "**/*.tf"
+
+      - from: ../../../../../../common/infra/terraform/core/gateway/apim-api
+        to: ./modules/apim-api
+        patterns:
+          - "**/*.tf"
+
       - from: ../../api/js
         to: ./src/api
         patterns:
@@ -65,23 +75,27 @@ repo:
         to: "ToDo Application with a Node.js API and Azure Cosmos DB API for MongoDB on Azure App Service (Terraform)"
         patterns:
           - "README.md"
-      
+
       - from: "PLACEHOLDER_DESCRIPTION"
         to: "using Terraform as the IaC provider"
         patterns:
           - "README.md"
-
 
       - from: "todo-nodejs-mongo"
         to: "todo-nodejs-mongo-terraform"
         patterns:
           - "README.md"
 
+      - from: ../../../../api/common/openapi.yaml
+        to: ../../../src/api/openapi.yaml
+        patterns:
+          - "apim-api.tf"
+
   assets:
     # Common assets
     - from: ./../../
       to: ./
-      ignore: 
+      ignore:
         - ".repo/**/*"
         - "repo.y[a]ml"
         - "azure.y[a]ml"
@@ -102,10 +116,15 @@ repo:
     - from: ../../../../../common
       to: ./
       ignore:
-      - .devcontainer/**/*
-      - "infra/**/*"
-      - .github/**/*
-    
+        - .devcontainer/**/*
+        - "infra/**/*"
+        - .github/**/*
+        - .azdo/pipelines/*/azure-dev.yml
+
+    # AzDo workflows for bicep
+    - from: ../../../../../common/.azdo/pipelines/terraform/azure-dev.yml
+      to: ./.azdo/pipelines/azure-dev.yml
+
     # Github workflows for terraform
     - from: ../../../../../common/.github/workflows/terraform
       to: ./.github/workflows
@@ -115,7 +134,7 @@ repo:
 
     - from: ../../../../../common/infra/terraform/core/monitor/loganalytics
       to: ./infra/modules/loganalytics
-    
+
     - from: ../../../../../common/infra/terraform/core/security/keyvault
       to: ./infra/modules/keyvault
 
@@ -128,9 +147,17 @@ repo:
     - from: ../../../../../common/infra/terraform/core/host/appservice/appservicenode
       to: ./infra/modules/appservicenode
 
+    - from: ../../../../../common/infra/shared/gateway/apim
+      to: ./infra/modules/apim-api
 
+    - from: ../../../../../common/infra/terraform/core/gateway/apim
+      to: ./infra/modules/apim
+
+    - from: ../../../../../common/infra/terraform/core/gateway/apim-api
+      to: ./infra/modules/apim-api
+      
     # .devcontainer common (devcontainer.json)
-    - from: ../../../../../common/.devcontainer/devcontainer.json/nodejs
+    - from: ../../../../../common/.devcontainer/devcontainer.json/nodejs/terraform
       to: ./.devcontainer
 
     # .devcontainer common (Dockerfile)
@@ -144,6 +171,10 @@ repo:
     # Tests common
     - from: ../../../../common/tests
       to: ./tests
+
+    # Auth JS common
+    - from: ../../../../common/auth/js
+      to: ./src/api/src
 
     # Node JS API
     - from: ../../../../api/js
@@ -161,7 +192,7 @@ repo:
         - "build/**/*"
         - "node_modules/**/*"
 
-    # Infra 
+    # Infra
     - from: ./infra/
       to: ./infra
 

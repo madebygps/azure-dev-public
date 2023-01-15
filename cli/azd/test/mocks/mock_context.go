@@ -2,46 +2,38 @@ package mocks
 
 import (
 	"context"
-	"os"
 
-	"github.com/azure/azure-dev/cli/azd/internal"
-	"github.com/azure/azure-dev/cli/azd/pkg/exec"
+	"github.com/azure/azure-dev/cli/azd/pkg/config"
 	"github.com/azure/azure-dev/cli/azd/pkg/httputil"
-	"github.com/azure/azure-dev/cli/azd/pkg/identity"
-	"github.com/azure/azure-dev/cli/azd/pkg/input"
-	"github.com/azure/azure-dev/cli/azd/pkg/output"
-	mockconfig "github.com/azure/azure-dev/cli/azd/test/mocks/config"
-	mockconsole "github.com/azure/azure-dev/cli/azd/test/mocks/console"
-	mockexec "github.com/azure/azure-dev/cli/azd/test/mocks/exec"
-	mockhttp "github.com/azure/azure-dev/cli/azd/test/mocks/httputil"
+	"github.com/azure/azure-dev/cli/azd/test/mocks/mockconfig"
+	"github.com/azure/azure-dev/cli/azd/test/mocks/mockexec"
+	"github.com/azure/azure-dev/cli/azd/test/mocks/mockhttp"
+	"github.com/azure/azure-dev/cli/azd/test/mocks/mockinput"
 )
 
 type MockContext struct {
+	Credentials   *MockCredentials
 	Context       *context.Context
-	Console       *mockconsole.MockConsole
+	Console       *mockinput.MockConsole
 	HttpClient    *mockhttp.MockHttpClient
 	CommandRunner *mockexec.MockCommandRunner
 	ConfigManager *mockconfig.MockConfigManager
 }
 
 func NewMockContext(ctx context.Context) *MockContext {
-	mockConsole := mockconsole.NewMockConsole()
+	mockConsole := mockinput.NewMockConsole()
 	commandRunner := mockexec.NewMockCommandRunner()
 	httpClient := mockhttp.NewMockHttpUtil()
 	credentials := MockCredentials{}
 	configManager := mockconfig.NewMockConfigManager()
 
 	mockexec.AddAzLoginMocks(commandRunner)
-	httpClient.AddDefaultMocks()
 
-	ctx = internal.WithCommandOptions(ctx, internal.GlobalCommandOptions{})
-	ctx = input.WithConsole(ctx, mockConsole)
-	ctx = exec.WithCommandRunner(ctx, commandRunner)
 	ctx = httputil.WithHttpClient(ctx, httpClient)
-	ctx = identity.WithCredentials(ctx, &credentials)
-	ctx = output.WithWriter(ctx, os.Stdout)
+	ctx = config.WithConfigManager(ctx, configManager)
 
 	mockContext := &MockContext{
+		Credentials:   &credentials,
 		Context:       &ctx,
 		Console:       mockConsole,
 		CommandRunner: commandRunner,

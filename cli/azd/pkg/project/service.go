@@ -5,13 +5,13 @@ package project
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 
 	"github.com/azure/azure-dev/cli/azd/pkg/environment"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment/azdcontext"
 	"github.com/azure/azure-dev/cli/azd/pkg/tools"
-	"github.com/azure/azure-dev/cli/azd/pkg/tools/azcli"
 )
 
 type Service struct {
@@ -19,12 +19,14 @@ type Service struct {
 	Project *Project
 	// The reference to the service configuration from the azure.yaml file
 	Config *ServiceConfig
+	// The environment the service is executing in
+	Environment *environment.Environment
 	// The framework/platform service used to build and package the service
 	Framework FrameworkService
 	// The application target service used to deploy the service to azure
 	Target ServiceTarget
-	// The deployment scope of the service, ex) subscriptionId, resource group name & resource name
-	Scope *environment.DeploymentScope
+	// The target resource of the service, ex) subscriptionId, resource group name & resource name
+	TargetResource *environment.TargetResource
 }
 
 type ServiceDeploymentChannelResponse struct {
@@ -77,6 +79,13 @@ func (svc *Service) Deploy(
 			return
 		}
 
+		// Allow users to specify their own endpoints, in cases where they've configured their own front-end load balancers,
+		// reverse proxies or DNS host names outside of the service target (and prefer that to be used instead).
+		overriddenEndpoints := svc.getOverriddenEndpoints()
+		if len(overriddenEndpoints) > 0 {
+			res.Endpoints = overriddenEndpoints
+		}
+
 		log.Printf("deployed service %s", svc.Config.Name)
 		progress <- "Deployment completed"
 
@@ -88,43 +97,22 @@ func (svc *Service) Deploy(
 	return result, progress
 }
 
-// GetServiceResourceName attempts to find the name of the azure resource with the
-// 'azd-service-name' tag set to the service key.
-func GetServiceResourceName(
-	ctx context.Context,
-	resourceGroupName string,
-	serviceName string,
-	env *environment.Environment,
-) (string, error) {
-	res, err := GetServiceResources(ctx, resourceGroupName, serviceName, env)
-	if err != nil {
-		return "", err
+func (svc *Service) getOverriddenEndpoints() []string {
+	overriddenEndpoints := svc.Environment.GetServiceProperty(svc.Config.Name, "ENDPOINTS")
+	if overriddenEndpoints != "" {
+		var endpoints []string
+		err := json.Unmarshal([]byte(overriddenEndpoints), &endpoints)
+		if err != nil {
+			// This can only happen if the environment output was not a valid JSON array, which would be due to an authoring
+			// error. For typical infra provider output passthrough, the infra provider would guarantee well-formed syntax
+			log.Printf(
+				"failed to unmarshal endpoints override for service '%s' as JSON array of strings: %v, skipping override",
+				svc.Config.Name,
+				err)
+		}
+
+		return endpoints
 	}
 
-	if len(res) != 1 {
-		log.Printf("Expecting only '1' resource match to override resource name but found '%d'", len(res))
-		return fmt.Sprintf("%s%s", env.GetEnvName(), serviceName), nil
-	}
-
-	return res[0].Name, nil
-}
-
-// GetServiceResources gets the resources tagged for a given service
-func GetServiceResources(
-	ctx context.Context,
-	resourceGroupName string,
-	serviceName string,
-	env *environment.Environment,
-) ([]azcli.AzCliResource, error) {
-	azCli := azcli.GetAzCli(ctx)
-	filter := fmt.Sprintf("tagName eq 'azd-service-name' and tagValue eq '%s'", serviceName)
-
-	return azCli.ListResourceGroupResources(
-		ctx,
-		env.GetSubscriptionId(),
-		resourceGroupName,
-		&azcli.ListResourceGroupResourcesOptions{
-			Filter: &filter,
-		},
-	)
+	return nil
 }

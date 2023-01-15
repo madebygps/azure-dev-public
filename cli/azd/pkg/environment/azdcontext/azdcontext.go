@@ -8,23 +8,19 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/azure/azure-dev/cli/azd/pkg/contracts"
 	"github.com/azure/azure-dev/cli/azd/pkg/osutil"
 )
 
 const ProjectFileName = "azure.yaml"
 const EnvironmentDirectoryName = ".azure"
+const DotEnvFileName = ".env"
 const ConfigFileName = "config.json"
 const ConfigFileVersion = 1
 const InfraDirectoryName = "infra"
 
 type AzdContext struct {
 	projectDirectory string
-}
-
-type EnvironmentView struct {
-	Name       string
-	IsDefault  bool
-	DotEnvPath string
 }
 
 func (c *AzdContext) ProjectDirectory() string {
@@ -51,19 +47,23 @@ func (c *AzdContext) GetDefaultProjectName() string {
 	return filepath.Base(c.ProjectDirectory())
 }
 
-func (c *AzdContext) GetEnvironmentFilePath(name string) string {
-	return filepath.Join(c.EnvironmentDirectory(), name, ".env")
+func (c *AzdContext) EnvironmentDotEnvPath(name string) string {
+	return filepath.Join(c.EnvironmentDirectory(), name, DotEnvFileName)
+}
+
+func (c *AzdContext) EnvironmentRoot(name string) string {
+	return filepath.Join(c.EnvironmentDirectory(), name)
 }
 
 func (c *AzdContext) GetEnvironmentWorkDirectory(name string) string {
-	return filepath.Join(c.GetEnvironmentFilePath(name), "wd")
+	return filepath.Join(c.EnvironmentRoot(name), "wd")
 }
 
 func (c *AzdContext) GetInfrastructurePath() string {
 	return filepath.Join(c.ProjectDirectory(), InfraDirectoryName)
 }
 
-func (c *AzdContext) ListEnvironments() ([]EnvironmentView, error) {
+func (c *AzdContext) ListEnvironments() ([]contracts.EnvListEnvironment, error) {
 	defaultEnv, err := c.GetDefaultEnvironmentName()
 	if err != nil {
 		return nil, err
@@ -74,13 +74,13 @@ func (c *AzdContext) ListEnvironments() ([]EnvironmentView, error) {
 		return nil, fmt.Errorf("listing entries: %w", err)
 	}
 
-	var envs []EnvironmentView
+	var envs []contracts.EnvListEnvironment
 	for _, ent := range ents {
 		if ent.IsDir() {
-			ev := EnvironmentView{
+			ev := contracts.EnvListEnvironment{
 				Name:       ent.Name(),
 				IsDefault:  ent.Name() == defaultEnv,
-				DotEnvPath: c.GetEnvironmentFilePath(ent.Name()),
+				DotEnvPath: c.EnvironmentDotEnvPath(ent.Name()),
 			}
 			envs = append(envs, ev)
 		}
@@ -147,6 +147,21 @@ func (c *AzdContext) NewEnvironment(name string) error {
 	return nil
 }
 
+// Creates context with project directory set to the desired directory.
+func NewAzdContextWithDirectory(projectDirectory string) *AzdContext {
+	return &AzdContext{
+		projectDirectory: projectDirectory,
+	}
+}
+
+var (
+	ErrNoProject = errors.New("no project exists; to create a new project, run `azd init`")
+)
+
+// Creates context with project directory set to the nearest project file found.
+//
+// The project file is first searched for in the current directory, if not found, the parent directory is searched
+// recursively up to root. If no project file is found, errNoProject is returned.
 func NewAzdContext() (*AzdContext, error) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -154,8 +169,7 @@ func NewAzdContext() (*AzdContext, error) {
 	}
 
 	// Walk up from the CWD to the root, looking for a project file. If we find one, that's
-	// the root for our project. If we don't use the CWD as the root (as it's the place that
-	// we would `init` into).
+	// the root project directory.
 	searchDir, err := filepath.Abs(wd)
 	if err != nil {
 		return nil, fmt.Errorf("resolving path: %w", err)
@@ -167,10 +181,7 @@ func NewAzdContext() (*AzdContext, error) {
 		if os.IsNotExist(err) || (err == nil && stat.IsDir()) {
 			parent := filepath.Dir(searchDir)
 			if parent == searchDir {
-				// hit the root without finding anything. Behave as if we had
-				// found an `azure.yaml` file in the CWD.
-				searchDir = wd
-				break
+				return nil, ErrNoProject
 			}
 			searchDir = parent
 		} else if err == nil {

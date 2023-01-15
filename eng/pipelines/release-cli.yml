@@ -3,7 +3,7 @@ resources:
     - repository: azure-sdk-build-tools
       type: git
       name: internal/azure-sdk-build-tools
-      ref: refs/tags/azure-sdk-build-tools_20220920.1
+      ref: refs/tags/azure-sdk-build-tools_20230112.1
 
 # Continuous deployment trigger
 trigger:
@@ -33,10 +33,11 @@ stages:
         strategy:
           matrix:
             Windows:
-              Pool: azsdk-pool-mms-win-2019-general
-              OSVmImage: MMS2019
+              Pool: azsdk-pool-mms-win-2022-general
+              OSVmImage: MMS2022
               BuildTarget: azd-windows-amd64.exe
               BuildOutputName: azd.exe
+              BuildTestMsi: true
               AZURE_DEV_CI_OS: win
             Linux:
               Pool: azsdk-pool-mms-ubuntu-2004-general
@@ -62,21 +63,10 @@ stages:
         steps:
           - checkout: self
           - template: /eng/pipelines/templates/steps/setup-go.yml
-
-          - template: /eng/pipelines/templates/steps/set-cli-version-cd.yml
-
-          - template: /eng/pipelines/templates/steps/install-bicep.yml
             parameters:
               Condition: and(succeeded(), ne(variables['Skip.LiveTest'], 'true'))
 
-          - template: /eng/pipelines/templates/steps/install-terraform.yml
-
-          - task: DockerInstaller@0
-            displayName: Docker Installer
-            condition: and(succeeded(), contains(variables['OSVmImage'], 'macOS'))
-            inputs:
-              dockerVersion: 17.09.0-ce
-              releaseType: stable
+          - template: /eng/pipelines/templates/steps/set-cli-version-cd.yml
 
           - task: PowerShell@2
             inputs:
@@ -96,6 +86,24 @@ stages:
               workingDirectory: cli/azd
             displayName: Build Go Binary
 
+          - template: /eng/pipelines/templates/steps/build-msi.yml
+            parameters:
+              Title: Build Test MSI
+              Condition: and(succeeded(), eq(variables['BuildTestMsi'], 'true'))
+
+          - template: /eng/pipelines/templates/steps/install-bicep.yml
+            parameters:
+              Condition: and(succeeded(), ne(variables['Skip.LiveTest'], 'true'))
+
+          - template: /eng/pipelines/templates/steps/install-terraform.yml
+
+          - task: DockerInstaller@0
+            displayName: Docker Installer
+            condition: and(succeeded(), contains(variables['OSVmImage'], 'macOS'))
+            inputs:
+              dockerVersion: 17.09.0-ce
+              releaseType: stable
+
           # Live testing uses dotnet 6.0.x in the WebApp project deployment
           - task: UseDotNet@2
             condition: and(succeeded(), ne(variables['Skip.LiveTest'], 'true'))
@@ -103,6 +111,12 @@ stages:
               version: 6.0.x
 
           - template: /eng/pipelines/templates/steps/az-login.yml
+            parameters:
+              Condition: and(succeeded(), ne(variables['Skip.LiveTest'], 'true'))
+
+          - template: /eng/pipelines/templates/steps/azd-login.yml
+            parameters:
+              AzdDirectory: cli/azd
 
           - task: PowerShell@2
             condition: and(succeeded(), ne(variables['Skip.LiveTest'], 'true'))
@@ -190,6 +204,11 @@ stages:
             condition: always()
             displayName: Upload azd binary to artifact store
 
+          - publish: cli/installer/windows/bin/Release
+            artifact: test-msi
+            condition: and(succeeded(), eq(variables['BuildTestMsi'], 'true'))
+            displayName: Upload test MSI
+
       - job: GenerateReleaseArtifacts
         pool:
           name: azsdk-pool-mms-ubuntu-2004-general
@@ -245,8 +264,150 @@ stages:
             artifact: docs
             displayName: Upload generated documentation
 
+  - stage: Sign
+    dependsOn: BuildAndTest
+    jobs:
+
+    - job: SignMac
+      pool:
+        name: azsdk-pool-mms-win-2022-general
+        vmImage: MMS2022
+
+      steps:
+        - task: DownloadPipelineArtifact@2
+          inputs:
+            artifact: azd-darwin-amd64
+            path: mac-artifacts
+
+        - pwsh: |
+            New-Item -ItemType Directory -Path mac
+            Compress-Archive `
+            -Path mac-artifacts/azd-darwin-amd64 `
+            -DestinationPath mac/azd-darwin-amd64.zip
+          displayName: Package mac binary for signing
+
+        - ${{ if in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI', 'Manual') }}:
+          - template: pipelines/steps/azd-cli-mac-signing.yml@azure-sdk-build-tools
+            parameters:
+              MacPath: mac
+
+        - ${{ else }}:
+          - pwsh: Write-Host "Skipping signing. Build reason - $(Build.Reason)"
+            displayName: Signing process skipped for non-release build
+
+        - pwsh: |
+            Expand-Archive -Path mac/azd-darwin-amd64.zip -DestinationPath mac/
+            Remove-Item mac/azd-darwin-amd64.zip
+          displayName: Extract azd-darwin-amd64 from zip and remove zip
+
+        - pwsh: |
+            New-Item -ItemType Directory -Path signed-mac
+            Copy-Item mac/* signed-mac/ -Recurse
+          displayName: Copy signing outputs
+          condition: always()
+
+        # TODO: Replace with https://github.com/Azure/azure-sdk-tools/blob/main/eng/common/pipelines/templates/steps/publish-artifact.yml
+        # when the common engsys is imported.
+        # https://github.com/Azure/azure-dev/issues/956
+        - task: PublishPipelineArtifact@1
+          condition: succeeded()
+          displayName: Publish Signed Artifacts
+          inputs:
+            artifactName: signed-mac
+            path: signed-mac/
+
+        - task: PublishPipelineArtifact@1
+          condition: failed()
+          displayName: Publish failed Signed Artifacts
+          inputs:
+            artifactName: signed-mac-FailedAttempt$(System.JobAttempt)
+            path: signed-mac/
+
+    - job: SignWindows
+      pool:
+        name: azsdk-pool-mms-win-2022-general
+        vmImage: MMS2022
+
+      steps:
+        # Checkout required to build MSI
+        - checkout: self
+
+        - task: DownloadPipelineArtifact@2
+          inputs:
+            artifact: azd-windows-amd64.exe
+            path: win
+
+        - task: DownloadPipelineArtifact@2
+          inputs:
+            artifact: install-pwsh
+            path: installer
+
+        - pwsh: Copy-Item installer/*.ps1 win
+          displayName: Copy install scripts to win/
+
+        - ${{ if in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI', 'Manual') }}:
+          - template: pipelines/steps/azd-cli-win-signing.yml@azure-sdk-build-tools
+            parameters:
+              WinPath:  win
+              WinPattern: '**'
+
+        - ${{ else }}:
+          - pwsh: Write-Host "Skipping signing. Build reason - $(Build.Reason)"
+            displayName: Signing process skipped for non-release build
+
+        - pwsh: |
+            New-Item -ItemType Directory -Path signed-win
+            Copy-Item win/* signed-win/ -Recurse
+            Copy-Item win/azd-windows-amd64.exe cli/azd/azd.exe
+          displayName: Copy signing outputs for publishing and MSI build
+          condition: always()
+
+        - task: PowerShell@2
+          inputs:
+            pwsh: true
+            targetType: filePath
+            filePath: eng/scripts/Set-CliVersionVariable.ps1
+          displayName: Set CLI_VERSION for MSI build
+
+        - template: /eng/pipelines/templates/steps/build-msi.yml
+          parameters:
+            Title: Build Release MSI
+
+        - ${{ if in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI', 'Manual') }}:
+          - template: pipelines/steps/azd-cli-win-signing.yml@azure-sdk-build-tools
+            parameters:
+              WinPath:  cli/installer/windows/bin/Release
+              WinPattern: '*.msi'
+
+        - ${{ else }}:
+          - pwsh: Write-Host "Skipping signing. Build reason - $(Build.Reason)"
+            displayName: Signing process skipped for non-release build
+
+        - pwsh: Copy-Item cli/installer/windows/bin/Release/* signed-win/
+          displayName: Copy MSI for publishing
+
+        # TODO: Replace with https://github.com/Azure/azure-sdk-tools/blob/main/eng/common/pipelines/templates/steps/publish-artifact.yml
+        # when the common engsys is imported.
+        # https://github.com/Azure/azure-dev/issues/956
+        - task: PublishPipelineArtifact@1
+          condition: succeeded()
+          displayName: Publish Signed Artifacts
+          inputs:
+            artifactName: signed-win
+            path: signed-win/
+
+        - task: PublishPipelineArtifact@1
+          condition: failed()
+          displayName: Publish failed Signed Artifacts
+          inputs:
+            artifactName: signed-win-FailedAttempt$(System.JobAttempt)
+            path: signed-win/
+
+  - stage: Verify_Installers
+    condition: and(succeeded(), ne(variables['Skip.VerifyInstallers'], 'true'))
+    dependsOn: BuildAndTest
+    jobs:
       - job: Compress_For_Hosting
-        dependsOn: BuildCLI
         pool:
           name: azsdk-pool-mms-ubuntu-2004-general
           vmImage: MMSUbuntu20.04
@@ -267,14 +428,25 @@ stages:
               artifact: azd-darwin-amd64
               path: azd-darwin-amd64
 
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: test-msi
+              path: msi
+
           - pwsh: |
               Write-Host "Moving downloaded files to hosting folder"
               New-Item -ItemType Directory -Path hosting
 
               Write-Host "Compressing artifacts as if publishing"
               zip hosting/azd-windows-amd64.zip -j azd-windows-amd64.exe/azd-windows-amd64.exe
+
+              chmod +x azd-darwin-amd64/azd-darwin-amd64
               zip hosting/azd-darwin-amd64.zip -j azd-darwin-amd64/azd-darwin-amd64
+
+              chmod +x azd-linux-amd64/azd-linux-amd64
               tar -C azd-linux-amd64 -cvzf hosting/azd-linux-amd64.tar.gz azd-linux-amd64
+
+              Copy-Item msi/azd-windows-amd64.msi hosting/
 
               Get-ChildItem hosting/ -Recurse | Select-Object -Property Name,Size
             displayName: Move folders to hosting location
@@ -282,88 +454,38 @@ stages:
           - publish: hosting
             artifact: test-hosting
 
-  - stage: Sign
-    dependsOn: BuildAndTest
-    jobs:
-    - job: Sign
-      pool:
-        name: azsdk-pool-mms-win-2019-general
-        vmImage: MMS2019
+      - job: Verify_MSI
+        dependsOn: Compress_For_Hosting
+        pool: azsdk-pool-mms-win-2022-general
+        strategy:
+          matrix:
+            PerUser: 
+              PerMachine: $false
+            AllUsers:
+              PerMachine: $true
+        steps:
+          - checkout: self
+          
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: test-msi
+              path: msi
+          
+          - task: PowerShell@2
+            inputs:
+              pwsh: true
+              targetType: filePath
+              filePath: cli/installer/windows/test-win-msi.ps1
+              arguments: >-
+                -PerMachine:$(PerMachine) 
+                -MsiPath msi/azd-windows-amd64.msi
+              # Do not exit on first Write-Error, write all messages and let the 
+              # script handle exiting with an error status.
+              errorActionPreference: continue
+            displayName: Test MSI
 
-      steps:
-        - task: DownloadPipelineArtifact@2
-          inputs:
-            artifact: azd-windows-amd64.exe
-            path: win
-
-        - task: DownloadPipelineArtifact@2
-          inputs:
-            artifact: install-pwsh
-            path: installer
-
-        - pwsh: Copy-Item installer/*.ps1 win
-          displayName: Copy install scripts to win/
-
-        - task: DownloadPipelineArtifact@2
-          inputs:
-            artifact: azd-darwin-amd64
-            path: mac-artifacts
-
-        - pwsh: |
-            New-Item -ItemType Directory -Path mac
-            Compress-Archive `
-            -Path mac-artifacts/azd-darwin-amd64 `
-            -DestinationPath mac/azd-darwin-amd64.zip
-          displayName: Package mac binary for signing
-
-        - ${{ if in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI', 'Manual') }}:
-          - template: pipelines/steps/azd-cli-signing.yml@azure-sdk-build-tools
-            parameters:
-              WinPath:  win
-              WinPattern: '**'
-              MacPath: mac
-
-        - ${{ else }}:
-          - pwsh: Write-Host "Skipping signing. Build reason - $(Build.Reason)"
-            displayName: Signing process skipped for non-release build
-
-        - pwsh: |
-            Expand-Archive -Path mac/azd-darwin-amd64.zip -DestinationPath mac/
-            Remove-Item mac/azd-darwin-amd64.zip
-          displayName: Extract azd-darwin-amd64 from zip and remove zip
-
-        - pwsh: |
-            New-Item -ItemType Directory -Path signed
-            Copy-Item win/ signed/ -Recurse
-            Copy-Item mac/ signed/ -Recurse
-          displayName: Copy signing outputs
-          condition: always()
-
-        - publish: signed/
-          artifact: signed
-          condition: succeeded()
-
-        # TODO: Replace with https://github.com/Azure/azure-sdk-tools/blob/main/eng/common/pipelines/templates/steps/publish-artifact.yml
-        # when the common engsys is imported.
-        # https://github.com/Azure/azure-dev/issues/956
-        - task: PublishPipelineArtifact@1
-          condition: succeeded()
-          displayName: Publish Signed Artifacts
-          inputs:
-            artifactName: signed
-            path: signed/
-
-        - task: PublishPipelineArtifact@1
-          condition: failed()
-          displayName: Publish failed Signed Artifacts
-          inputs:
-            artifactName: signed-FailedAttempt$(System.JobAttempt)
-            path: signed/
-
-  - stage: Verify_Installers
-    dependsOn: BuildAndTest
-    jobs:
       - job: Verify_Mac_InstallOver
+        dependsOn: Compress_For_Hosting
         pool:
           name: Azure Pipelines
           vmImage: macOS-12
@@ -386,6 +508,7 @@ stages:
             displayName: Run azd version (expect no failure)
 
       - job: Verify_Installers
+        dependsOn: Compress_For_Hosting
         strategy:
           matrix:
             LinuxDockerSh:
@@ -394,9 +517,10 @@ stages:
               TestShell: pwsh
               TestInstallCommand: >
                 ./test-installer-containers.ps1
-                -BaseUrl "http://localhost:8080"
+                -BaseUrl "http://host.docker.internal:8080"
                 -Version ''
                 -ContainerPrefix '$(docker-mirror-tag-prefix)/'
+                -AdditionalRunArgs '--add-host=host.docker.internal:host-gateway'
             LinuxSh:
               Pool: azsdk-pool-mms-ubuntu-2004-general
               OSVmImage:  MMSUbuntu20.04
@@ -448,20 +572,20 @@ stages:
                 ./test-pwsh-xplat-install.ps1 -BaseUrl $env:BASEURL -Version ''
 
             WindowsCmd:
-              Pool: azsdk-pool-mms-win-2019-general
-              OSVmImage: MMS2019
+              Pool: azsdk-pool-mms-win-2022-general
+              OSVmImage: MMS2022
               TestShell: cmd
               TestInstallCommand: cmd /c test-windows-install.cmd %BASEURL%
             WindowsPwsh:
-              Pool: azsdk-pool-mms-win-2019-general
-              OSVmImage: MMS2019
+              Pool: azsdk-pool-mms-win-2022-general
+              OSVmImage: MMS2022
               TestShell: pwsh
               TestInstallCommand: >
                 ./test-win-install.ps1 -BaseUrl $env:BASEURL -Version '';
                 ./test-telemetry-functions.ps1 -Shell pwsh -ExpectedFieldMap telemetry/windows.pwsh.telemetry.json
             WindowsPowerShell:
-              Pool: azsdk-pool-mms-win-2019-general
-              OSVmImage: MMS2019
+              Pool: azsdk-pool-mms-win-2022-general
+              OSVmImage: MMS2022
               TestShell: powershell
               TestInstallCommand: >
                 ./test-win-install.ps1 -BaseUrl $env:BASEURL -Version '';
@@ -580,6 +704,11 @@ stages:
       )
     jobs:
       - deployment: Publish_Release
+        condition: >-
+          and(
+            succeeded(),
+            ne('true', variables['Skip.Publish'])
+          )
         environment: azure-dev
 
         pool:
@@ -605,6 +734,40 @@ stages:
                     PublishShield: true
                     DockerImageTags: $(CLI_VERSION);latest
                     ReleaseSyndicatedDockerContainer: true
+                    PublishUpdatedDocs: true
+                    UploadMsi: true
+
+      - deployment: Increment_Version
+        condition: >-
+          and(
+            succeeded(),
+            ne('true', variables['Skip.IncrementVersion'])
+          )
+        dependsOn: Publish_Release
+        environment: azure-dev
+
+        pool:
+          name: azsdk-pool-mms-ubuntu-2004-general
+          OSVmImage: MMSUbuntu20.04
+
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: PowerShell@2
+                  inputs:
+                    pwsh: true
+                    targetType: filePath
+                    filePath: eng/scripts/Update-CliVersion.ps1
+                  displayName: Increment CLI version
+
+                - template: /eng/common/pipelines/templates/steps/create-pull-request.yml
+                  parameters:
+                    PRBranchName: cli-version-increment-$(Build.BuildId)
+                    CommitMsg: Increment CLI version after release
+                    PRTitle: Increment CLI version after release
 
   - stage: PublishIntegration
     dependsOn: Sign
@@ -643,6 +806,7 @@ stages:
               PublishUploadLocations: release/daily;daily/archive/$(Build.BuildId)-$(Build.SourceVersion)
               PublishShield: false
               DockerImageTags: daily;$(CLI_VERSION)
+              UploadMsi: true
 
       - job: Publish_For_PR
         condition: >-
@@ -685,6 +849,7 @@ stages:
               PublishUploadLocations: pr/$(PRNumber)
               UploadInstaller: true
               DockerImageTags: pr-$(PRNumber)
+              UploadMsi: true
 
           - pwsh: |
               $urlBase = "https://$(azdev-storage-account-name).blob.core.windows.net/azd/standalone/pr/$(PRNumber)"
@@ -692,11 +857,19 @@ stages:
             name: GenerateUrlBase
             displayName: Set UrlBase
 
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: docs
+              path: docs
+
           - pwsh: |
               $urlBase = "$(GenerateUrlBase.UrlBase)"
               $linuxReleaseUrl = "$urlBase/azd-linux-amd64.tar.gz"
               $macosReleaseUrl = "$urlBase/azd-darwin-amd64.zip"
               $windowsReleaseUrl = "$urlBase/azd-windows-amd64.zip"
+              $msiReleaseUrl = "$urlBase/azd-windows-amd64.msi"
+
+              $refDocContent = Get-Content docs/azd.md -Raw
 
               $content = @"
               <!-- #comment-cli-pr -->
@@ -722,9 +895,17 @@ stages:
 
 
               #### Windows
+              
+              PowerShell install
+
               ``````
               powershell -c "Set-ExecutionPolicy Bypass Process; irm '$urlBase/uninstall-azd.ps1' > uninstall-azd.ps1; ./uninstall-azd.ps1;"
               powershell -c "Set-ExecutionPolicy Bypass Process; irm '$urlBase/install-azd.ps1' > install-azd.ps1; ./install-azd.ps1 -BaseUrl '$urlBase' -Version '' -Verbose;"
+              ``````
+
+              MSI install
+              ``````
+              powershell -c "irm '$msiReleaseUrl' -OutFile azd-windows-amd64.msi; msiexec /i azd-windows-amd64.msi /qn"
               ``````
 
               ### Standalone Binary
@@ -733,10 +914,24 @@ stages:
               * MacOS - $macosReleaseUrl
               * Windows - $windowsReleaseUrl
 
+              ### MSI 
+
+              * $msiReleaseUrl
+
               ### Container
+
               ``````
               docker run -it $(azdev-acr-host)/azure-dev:pr-$(PRNumber)
               ``````
+
+              ## Documentation
+
+              <details>
+              <summary>learn.microsoft.com documentation</summary>
+
+              $refDocContent
+
+              </details>
               "@
               $file = New-TemporaryFile
               Set-Content -Path $file -Value $content
@@ -757,7 +952,7 @@ stages:
             env:
               GH_TOKEN: $(azuresdk-github-pat)
 
-  - stage: Publish_Installers
+  - stage: PublishInstallers
     dependsOn: Sign
     condition: >-
       and(
@@ -772,7 +967,7 @@ stages:
         )
       )
     jobs:
-      - deployment: Publish_Installers
+      - deployment: PublishInstallers
         environment: azure-dev
         pool:
           name: azsdk-pool-mms-ubuntu-2004-general
@@ -786,12 +981,12 @@ stages:
 
                 - task: DownloadPipelineArtifact@2
                   inputs:
-                    artifact: signed
-                    path: signed
+                    artifact: signed-win
+                    path: signed-win
 
                 - pwsh: |
                     New-Item -ItemType Directory -Path script-release
-                    Copy-Item signed/win/*.ps1 script-release/
+                    Copy-Item signed-win/*.ps1 script-release/
                     Copy-Item cli/installer/*.sh script-release/
                   displayName: Copy scripts for release upload
 

@@ -7,119 +7,137 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 
 	"github.com/azure/azure-dev/cli/azd/cmd/actions"
-	"github.com/azure/azure-dev/cli/azd/internal"
 	"github.com/azure/azure-dev/cli/azd/pkg/output"
 	"github.com/azure/azure-dev/cli/azd/pkg/templates"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
+	"golang.org/x/exp/maps"
+	"golang.org/x/exp/slices"
 )
 
-func templatesCmd(rootOptions *internal.GlobalCommandOptions) *cobra.Command {
-	root := &cobra.Command{
-		Use:   "template",
-		Short: "Manage templates.",
+func templateNameCompletion(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	templateManager := templates.NewTemplateManager()
+	templateSet, err := templateManager.ListTemplates()
+
+	if err != nil {
+		cobra.CompError(fmt.Sprintf("Error listing templates: %s", err))
+		return []string{}, cobra.ShellCompDirectiveError
 	}
 
-	root.AddCommand(BuildCmd(rootOptions, templatesListCmdDesign, initTemplatesListAction, nil))
-	root.AddCommand(BuildCmd(rootOptions, templatesShowCmdDesign, initTemplatesShowAction, nil))
-	root.Flags().BoolP("help", "h", false, fmt.Sprintf("Gets help for %s.", root.Name()))
-
-	return root
+	templateList := maps.Values(templateSet)
+	slices.SortFunc(templateList, func(a, b templates.Template) bool {
+		return a.Name < b.Name
+	})
+	templateNames := make([]string, len(templateList))
+	for i, v := range templateList {
+		templateNames[i] = v.Name
+	}
+	return templateNames, cobra.ShellCompDirectiveDefault
 }
 
-type templatesListFlags struct {
-	outputFormat string
-	global       *internal.GlobalCommandOptions
+func templatesActions(root *actions.ActionDescriptor) *actions.ActionDescriptor {
+	group := root.Add("template", &actions.ActionDescriptorOptions{
+		Command: &cobra.Command{
+			Short: "Manage templates.",
+		},
+	})
+
+	group.Add("list", &actions.ActionDescriptorOptions{
+		Command:        newTemplateListCmd(),
+		ActionResolver: newTemplatesListAction,
+		OutputFormats:  []output.Format{output.JsonFormat, output.TableFormat},
+		DefaultFormat:  output.TableFormat,
+	})
+
+	group.Add("show", &actions.ActionDescriptorOptions{
+		Command:        newTemplateShowCmd(),
+		ActionResolver: newTemplatesShowAction,
+		OutputFormats:  []output.Format{output.JsonFormat, output.TableFormat},
+		DefaultFormat:  output.TableFormat,
+	})
+
+	return group
 }
 
-func (tl *templatesListFlags) Bind(local *pflag.FlagSet, global *internal.GlobalCommandOptions) {
-	output.AddOutputFlag(local, &tl.outputFormat, []output.Format{output.JsonFormat, output.TableFormat}, output.TableFormat)
-	tl.global = global
-}
-
-func templatesListCmdDesign(global *internal.GlobalCommandOptions) (*cobra.Command, *templatesListFlags) {
-	cmd := &cobra.Command{
+func newTemplateListCmd() *cobra.Command {
+	return &cobra.Command{
 		Use:     "list",
 		Short:   "List templates.",
 		Aliases: []string{"ls"},
 	}
-
-	flags := &templatesListFlags{}
-	flags.Bind(cmd.Flags(), global)
-
-	return cmd, flags
 }
 
 type templatesListAction struct {
-	flags           templatesListFlags
 	formatter       output.Formatter
 	writer          io.Writer
 	templateManager *templates.TemplateManager
 }
 
 func newTemplatesListAction(
-	flags templatesListFlags,
 	formatter output.Formatter,
 	writer io.Writer,
 	templateManager *templates.TemplateManager,
-) *templatesListAction {
+) actions.Action {
 	return &templatesListAction{
-		flags:           flags,
 		formatter:       formatter,
 		writer:          writer,
 		templateManager: templateManager,
 	}
 }
 
-func (tl *templatesListAction) Run(ctx context.Context) error {
+func (tl *templatesListAction) Run(ctx context.Context) (*actions.ActionResult, error) {
 	templateSet, err := tl.templateManager.ListTemplates()
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	templateList := make([]templates.Template, 0, len(templateSet))
-	for _, template := range templateSet {
-		templateList = append(templateList, template)
-	}
+	templateList := maps.Values(templateSet)
+	slices.SortFunc(templateList, func(a, b templates.Template) bool {
+		return a.Name < b.Name
+	})
 
-	return formatTemplates(ctx, tl.formatter, tl.writer, templateList...)
+	return nil, formatTemplates(ctx, tl.formatter, tl.writer, templateList...)
 }
 
-type templatesShowAction actions.Action
+type templatesShowAction struct {
+	formatter       output.Formatter
+	writer          io.Writer
+	templateManager *templates.TemplateManager
+	templateName    string
+}
 
 func newTemplatesShowAction(
 	formatter output.Formatter,
 	writer io.Writer,
 	templateManager *templates.TemplateManager,
 	args []string,
-) templatesShowAction {
-	return actions.ActionFunc(func(ctx context.Context) error {
-		templateName := args[0]
-		matchingTemplate, err := templateManager.GetTemplate(templateName)
-
-		log.Printf("Template Name: %s\n", templateName)
-
-		if err != nil {
-			return err
-		}
-
-		return formatTemplates(ctx, formatter, writer, matchingTemplate)
-	})
+) actions.Action {
+	return &templatesShowAction{
+		formatter:       formatter,
+		writer:          writer,
+		templateManager: templateManager,
+		templateName:    args[0],
+	}
 }
 
-func templatesShowCmdDesign(rootOptions *internal.GlobalCommandOptions) (*cobra.Command, *struct{}) {
-	cmd := &cobra.Command{
+func (a *templatesShowAction) Run(ctx context.Context) (*actions.ActionResult, error) {
+	matchingTemplate, err := a.templateManager.GetTemplate(a.templateName)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return nil, formatTemplates(ctx, a.formatter, a.writer, matchingTemplate)
+}
+
+func newTemplateShowCmd() *cobra.Command {
+	return &cobra.Command{
 		Use:   "show <template>",
 		Short: "Show the template details.",
+		Args:  cobra.ExactArgs(1),
 	}
-	output.AddOutputParam(cmd, []output.Format{output.JsonFormat, output.TableFormat}, output.TableFormat)
-
-	cmd.Args = cobra.ExactArgs(1)
-	return cmd, &struct{}{}
 }
 
 func formatTemplates(

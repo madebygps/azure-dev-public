@@ -7,16 +7,17 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
+	"log"
 	"time"
 
+	"github.com/azure/azure-dev/cli/azd/cmd/actions"
 	"github.com/azure/azure-dev/cli/azd/internal"
-	"github.com/azure/azure-dev/cli/azd/pkg/convert"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment/azdcontext"
+	"github.com/azure/azure-dev/cli/azd/pkg/exec"
 	"github.com/azure/azure-dev/cli/azd/pkg/input"
 	"github.com/azure/azure-dev/cli/azd/pkg/output"
+	"github.com/azure/azure-dev/cli/azd/pkg/output/ux"
 	"github.com/azure/azure-dev/cli/azd/pkg/project"
-	"github.com/azure/azure-dev/cli/azd/pkg/spin"
 	"github.com/azure/azure-dev/cli/azd/pkg/tools"
 	"github.com/azure/azure-dev/cli/azd/pkg/tools/azcli"
 	"github.com/spf13/cobra"
@@ -24,25 +25,19 @@ import (
 )
 
 type deployFlags struct {
-	serviceName  string
-	outputFormat *string // pointer to allow delay-initialization when used in "azd up"
-	global       *internal.GlobalCommandOptions
+	serviceName string
+	global      *internal.GlobalCommandOptions
+	*envFlag
 }
 
 func (d *deployFlags) Bind(local *pflag.FlagSet, global *internal.GlobalCommandOptions) {
-	d.bindWithoutOutput(local, global)
-
-	d.outputFormat = convert.RefOf("")
-	output.AddOutputFlag(
-		local,
-		d.outputFormat,
-		[]output.Format{output.JsonFormat, output.NoneFormat},
-		output.NoneFormat)
+	d.bindNonCommon(local, global)
+	d.bindCommon(local, global)
 }
 
-// bindWithoutOutput binds all flags except for the output flag. This is used when multiple actions are attached
-// to the same command.
-func (d *deployFlags) bindWithoutOutput(local *pflag.FlagSet, global *internal.GlobalCommandOptions) {
+func (d *deployFlags) bindNonCommon(
+	local *pflag.FlagSet,
+	global *internal.GlobalCommandOptions) {
 	local.StringVar(
 		&d.serviceName,
 		"service",
@@ -50,16 +45,31 @@ func (d *deployFlags) bindWithoutOutput(local *pflag.FlagSet, global *internal.G
 		//nolint:lll
 		"Deploys a specific service (when the string is unspecified, all services that are listed in the "+azdcontext.ProjectFileName+" file are deployed).",
 	)
-
 	d.global = global
 }
 
-func deployCmdDesign(rootOptions *internal.GlobalCommandOptions) (*cobra.Command, *deployFlags) {
-	cmd := &cobra.Command{
+func (d *deployFlags) bindCommon(local *pflag.FlagSet, global *internal.GlobalCommandOptions) {
+	d.envFlag = &envFlag{}
+	d.envFlag.Bind(local, global)
+}
+
+func (d *deployFlags) setCommon(envFlag *envFlag) {
+	d.envFlag = envFlag
+}
+
+func newDeployFlags(cmd *cobra.Command, global *internal.GlobalCommandOptions) *deployFlags {
+	flags := &deployFlags{}
+	flags.Bind(cmd.Flags(), global)
+
+	return flags
+}
+
+func newDeployCmd() *cobra.Command {
+	return &cobra.Command{
 		Use:   "deploy",
-		Short: "Deploy the application's code to Azure.",
+		Short: "Deploy the app's code to Azure.",
 		//nolint:lll
-		Long: `Deploy the application's code to Azure.
+		Long: `Deploy the app's code to Azure.
 When no ` + output.WithBackticks("--service") + ` value is specified, all services in the ` + output.WithBackticks("azure.yaml") + ` file (found in the root of your project) are deployed.
 
 Examples:
@@ -70,39 +80,33 @@ Examples:
 	
 After the deployment is complete, the endpoint is printed. To start the service, select the endpoint or paste it in a browser.`,
 	}
-	df := deployFlags{}
-	df.Bind(cmd.Flags(), rootOptions)
-
-	return cmd, &df
 }
 
 type deployAction struct {
-	flags     deployFlags
-	azdCtx    *azdcontext.AzdContext
-	azCli     azcli.AzCli
-	formatter output.Formatter
-	writer    io.Writer
-	console   input.Console
+	flags         *deployFlags
+	azCli         azcli.AzCli
+	formatter     output.Formatter
+	writer        io.Writer
+	console       input.Console
+	commandRunner exec.CommandRunner
 }
 
 func newDeployAction(
-	flags deployFlags,
-	azdCtx *azdcontext.AzdContext,
+	flags *deployFlags,
 	azCli azcli.AzCli,
+	commandRunner exec.CommandRunner,
 	console input.Console,
 	formatter output.Formatter,
 	writer io.Writer,
-) (*deployAction, error) {
-	da := &deployAction{
-		flags:     flags,
-		azdCtx:    azdCtx,
-		azCli:     azCli,
-		formatter: formatter,
-		writer:    writer,
-		console:   console,
+) actions.Action {
+	return &deployAction{
+		flags:         flags,
+		azCli:         azCli,
+		formatter:     formatter,
+		writer:        writer,
+		console:       console,
+		commandRunner: commandRunner,
 	}
-
-	return da, nil
 }
 
 type DeploymentResult struct {
@@ -110,36 +114,33 @@ type DeploymentResult struct {
 	Services  []project.ServiceDeploymentResult `json:"services"`
 }
 
-func (d *deployAction) Run(ctx context.Context) error {
-	if err := ensureProject(d.azdCtx.ProjectPath()); err != nil {
-		return err
-	}
-
-	if err := tools.EnsureInstalled(ctx, d.azCli); err != nil {
-		return err
-	}
-
-	if err := ensureLoggedIn(ctx); err != nil {
-		return fmt.Errorf("failed to ensure login: %w", err)
-	}
-
-	env, ctx, err := loadOrInitEnvironment(ctx, &d.flags.global.EnvironmentName, d.azdCtx, d.console)
+func (d *deployAction) Run(ctx context.Context) (*actions.ActionResult, error) {
+	// We call `NewAzdContext` here instead of having the value injected because we want to delay the
+	// walk for the context until this command has started to execute (for example, in the case of `up`,
+	// the context is not created until the init action actually runs, which is after the infraCreateAction
+	// object is created.
+	azdCtx, err := azdcontext.NewAzdContext()
 	if err != nil {
-		return fmt.Errorf("loading environment: %w", err)
+		return nil, err
 	}
 
-	projConfig, err := project.LoadProjectConfig(d.azdCtx.ProjectPath(), env)
+	env, err := loadOrInitEnvironment(ctx, &d.flags.environmentName, azdCtx, d.console, d.azCli)
 	if err != nil {
-		return fmt.Errorf("loading project: %w", err)
+		return nil, fmt.Errorf("loading environment: %w", err)
+	}
+
+	projConfig, err := project.LoadProjectConfig(azdCtx.ProjectPath())
+	if err != nil {
+		return nil, fmt.Errorf("loading project: %w", err)
 	}
 
 	if d.flags.serviceName != "" && !projConfig.HasService(d.flags.serviceName) {
-		return fmt.Errorf("service name '%s' doesn't exist", d.flags.serviceName)
+		return nil, fmt.Errorf("service name '%s' doesn't exist", d.flags.serviceName)
 	}
 
-	proj, err := projConfig.GetProject(&ctx, env)
+	proj, err := projConfig.GetProject(ctx, env, d.console, d.azCli, d.commandRunner)
 	if err != nil {
-		return fmt.Errorf("creating project: %w", err)
+		return nil, fmt.Errorf("creating project: %w", err)
 	}
 
 	// Collect all the tools we will need to do the deployment and validate that
@@ -153,10 +154,13 @@ func (d *deployAction) Run(ctx context.Context) error {
 	}
 
 	if err := tools.EnsureInstalled(ctx, tools.Unique(allTools)...); err != nil {
-		return err
+		return nil, err
 	}
 
-	interactive := d.formatter.Kind() == output.NoneFormat
+	// Command title
+	d.console.MessageUxItem(ctx, &ux.MessageTitle{
+		Title: "Deploying services (azd deploy)",
+	})
 
 	var svcDeploymentResult project.ServiceDeploymentResult
 	var deploymentResults []project.ServiceDeploymentResult
@@ -169,45 +173,32 @@ func (d *deployAction) Run(ctx context.Context) error {
 			continue
 		}
 
-		deployAndReportProgress := func(ctx context.Context, showProgress func(string)) error {
-			result, progress := svc.Deploy(ctx, d.azdCtx)
+		stepMessage := fmt.Sprintf("Deploying service %s", svc.Config.Name)
+		d.console.ShowSpinner(ctx, stepMessage, input.Step)
+		result, progress := svc.Deploy(ctx, azdCtx)
 
-			// Report any progress
-			go func() {
-				for message := range progress {
-					showProgress(fmt.Sprintf("- %s...", message))
-				}
-			}()
-
-			response := <-result
-			if response.Error != nil {
-				return fmt.Errorf("deploying service: %w", response.Error)
+		// Report any progress to logs only. Changes for the console are managed by the console object.
+		// This routine is required to drain all the string messages sent by the `progress`.
+		go func() {
+			for message := range progress {
+				log.Printf("- %s...", message)
 			}
+		}()
 
-			svcDeploymentResult = *response.Result
-			deploymentResults = append(deploymentResults, svcDeploymentResult)
+		// block until deploy thread returns
+		response := <-result
 
-			return nil
+		d.console.StopSpinner(ctx, stepMessage, input.GetStepResultFormat(err))
+		if response.Error != nil {
+			return nil, fmt.Errorf("deploying service: %w", response.Error)
 		}
 
-		if interactive {
-			deployMsg := fmt.Sprintf("Deploying service %s...", output.WithHighLightFormat(svc.Config.Name))
-			d.console.Message(ctx, deployMsg)
+		svcDeploymentResult = *response.Result
+		deploymentResults = append(deploymentResults, svcDeploymentResult)
 
-			spinner, ctx := spin.GetOrCreateSpinner(ctx, d.console.Handles().Stdout, deployMsg)
-
-			spinner.Start()
-			err = deployAndReportProgress(ctx, spinner.Title)
-			spinner.Stop()
-
-			if err == nil {
-				reportServiceDeploymentResultInteractive(ctx, d.console, svc, &svcDeploymentResult)
-			}
-		} else {
-			err = deployAndReportProgress(ctx, nil)
-		}
-		if err != nil {
-			return err
+		// report endpoint
+		for _, endpoint := range svcDeploymentResult.Endpoints {
+			d.console.MessageUxItem(ctx, &ux.Endpoint{Endpoint: endpoint})
 		}
 	}
 
@@ -218,26 +209,14 @@ func (d *deployAction) Run(ctx context.Context) error {
 		}
 
 		if fmtErr := d.formatter.Format(aggregateDeploymentResult, d.writer, nil); fmtErr != nil {
-			return fmt.Errorf("deployment result could not be displayed: %w", fmtErr)
+			return nil, fmt.Errorf("deployment result could not be displayed: %w", fmtErr)
 		}
 	}
 
-	return nil
-}
-
-func reportServiceDeploymentResultInteractive(
-	ctx context.Context,
-	console input.Console,
-	svc *project.Service,
-	sdr *project.ServiceDeploymentResult,
-) {
-	var builder strings.Builder
-
-	builder.WriteString(fmt.Sprintf("Deployed service %s\n", output.WithHighLightFormat(svc.Config.Name)))
-
-	for _, endpoint := range sdr.Endpoints {
-		builder.WriteString(fmt.Sprintf(" - Endpoint: %s\n", output.WithLinkFormat(endpoint)))
-	}
-
-	console.Message(ctx, builder.String())
+	return &actions.ActionResult{
+		Message: &actions.ResultMessage{
+			Header:   "Your Azure app has been deployed!",
+			FollowUp: getResourceGroupFollowUp(ctx, d.formatter, d.azCli, projConfig, env),
+		},
+	}, nil
 }

@@ -11,10 +11,13 @@ import (
 	"strings"
 
 	"github.com/azure/azure-dev/cli/azd/internal/telemetry"
+	"github.com/azure/azure-dev/cli/azd/internal/telemetry/fields"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment"
+	"github.com/azure/azure-dev/cli/azd/pkg/exec"
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
+	"github.com/azure/azure-dev/cli/azd/pkg/input"
 	"github.com/azure/azure-dev/cli/azd/pkg/tools"
-	"github.com/drone/envsubst"
+	"github.com/azure/azure-dev/cli/azd/pkg/tools/azcli"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,7 +26,7 @@ import (
 // root>/schemas/vN.M/azure.yaml.json).
 type ProjectConfig struct {
 	Name              string                    `yaml:"name"`
-	ResourceGroupName string                    `yaml:"resourceGroup,omitempty"`
+	ResourceGroupName ExpandableString          `yaml:"resourceGroup,omitempty"`
 	Path              string                    `yaml:",omitempty"`
 	Metadata          *ProjectMetadata          `yaml:"metadata,omitempty"`
 	Services          map[string]*ServiceConfig `yaml:",omitempty"`
@@ -58,6 +61,8 @@ const (
 	Destroying Event = "destroying"
 	// Raised after project is destroyed
 	Destroyed Event = "destroyed"
+	// Raised after environment is updated
+	EnvironmentUpdated Event = "environment updated"
 )
 
 // Project lifecycle event arguments
@@ -89,7 +94,13 @@ func (p *ProjectConfig) HasService(name string) bool {
 
 // GetProject constructs a Project from the project configuration
 // This also performs project validation
-func (pc *ProjectConfig) GetProject(ctx *context.Context, env *environment.Environment) (*Project, error) {
+func (pc *ProjectConfig) GetProject(
+	ctx context.Context,
+	env *environment.Environment,
+	console input.Console,
+	azCli azcli.AzCli,
+	commandRunner exec.CommandRunner,
+) (*Project, error) {
 	serviceMap := map[string]*Service{}
 
 	project := Project{
@@ -99,36 +110,14 @@ func (pc *ProjectConfig) GetProject(ctx *context.Context, env *environment.Envir
 		Services: make([]*Service, 0),
 	}
 
-	// This sets the current template within the go context
-	// The context is then used when the AzCli is instantiated to set the correct user agent
-	if project.Metadata != nil && strings.TrimSpace(project.Metadata.Template) != "" {
-		*ctx = telemetry.ContextWithTemplate(*ctx, project.Metadata.Template)
-	}
-
-	resourceGroupName, err := GetResourceGroupName(*ctx, pc, env)
+	resourceGroupName, err := GetResourceGroupName(ctx, azCli, pc, env)
 	if err != nil {
 		return nil, err
 	}
 	project.ResourceGroupName = resourceGroupName
 
 	for key, serviceConfig := range pc.Services {
-		// If the 'resourceName' was not overridden in the project yaml
-		// Retrieve the resource name from the provisioned resources if available
-		if strings.TrimSpace(serviceConfig.ResourceName) == "" {
-			resolvedResourceName, err := GetServiceResourceName(*ctx, project.ResourceGroupName, serviceConfig.Name, env)
-			if err != nil {
-				return nil, fmt.Errorf("getting resource name: %w", err)
-			}
-
-			serviceConfig.ResourceName = resolvedResourceName
-		}
-
-		deploymentScope := environment.NewDeploymentScope(
-			env.GetSubscriptionId(),
-			project.ResourceGroupName,
-			serviceConfig.ResourceName,
-		)
-		service, err := serviceConfig.GetService(*ctx, &project, env, deploymentScope)
+		service, err := serviceConfig.GetService(ctx, &project, env, azCli, commandRunner, console)
 
 		if err != nil {
 			return nil, fmt.Errorf("creating service %s: %w", key, err)
@@ -223,27 +212,10 @@ func (pc *ProjectConfig) RaiseEvent(ctx context.Context, name Event, args map[st
 }
 
 // ParseProjectConfig will parse a project from a yaml string and return the project configuration
-func ParseProjectConfig(yamlContent string, env *environment.Environment) (*ProjectConfig, error) {
-	log.Printf("Parsing file contents, %s\n", yamlContent)
-	rawFile, err := envsubst.Parse(yamlContent)
-	if err != nil {
-		return nil, fmt.Errorf("parsing environment references in project file: %w", err)
-	}
-
-	file, err := rawFile.Execute(func(name string) string {
-		if val, has := env.Values[name]; has {
-			return val
-		}
-		return os.Getenv(name)
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("replacing environment references: %w", err)
-	}
-
+func ParseProjectConfig(yamlContent string) (*ProjectConfig, error) {
 	var projectFile ProjectConfig
 
-	if err = yaml.Unmarshal([]byte(file), &projectFile); err != nil {
+	if err := yaml.Unmarshal([]byte(yamlContent), &projectFile); err != nil {
 		return nil, fmt.Errorf(
 			"unable to parse azure.yaml file. Please check the format of the file, "+
 				"and also verify you have the latest version of the CLI: %w",
@@ -272,10 +244,12 @@ func ParseProjectConfig(yamlContent string, env *environment.Environment) (*Proj
 	return &projectFile, nil
 }
 
-func (p *ProjectConfig) Initialize(ctx context.Context, env *environment.Environment) error {
+func (p *ProjectConfig) Initialize(
+	ctx context.Context, env *environment.Environment, commandRunner exec.CommandRunner,
+) error {
 	var allTools []tools.ExternalTool
 	for _, svc := range p.Services {
-		frameworkService, err := svc.GetFrameworkService(ctx, env)
+		frameworkService, err := svc.GetFrameworkService(ctx, env, commandRunner)
 		if err != nil {
 			return fmt.Errorf("getting framework services: %w", err)
 		}
@@ -296,7 +270,7 @@ func (p *ProjectConfig) Initialize(ctx context.Context, env *environment.Environ
 
 // LoadProjectConfig loads the azure.yaml configuring into an viewable structure
 // This does not evaluate any tooling
-func LoadProjectConfig(projectPath string, env *environment.Environment) (*ProjectConfig, error) {
+func LoadProjectConfig(projectPath string) (*ProjectConfig, error) {
 	log.Printf("Reading project from file '%s'\n", projectPath)
 	bytes, err := os.ReadFile(projectPath)
 	if err != nil {
@@ -305,9 +279,13 @@ func LoadProjectConfig(projectPath string, env *environment.Environment) (*Proje
 
 	yaml := string(bytes)
 
-	projectConfig, err := ParseProjectConfig(yaml, env)
+	projectConfig, err := ParseProjectConfig(yaml)
 	if err != nil {
 		return nil, fmt.Errorf("parsing project file: %w", err)
+	}
+
+	if projectConfig.Metadata != nil {
+		telemetry.SetUsageAttributes(fields.StringHashed(fields.TemplateIdKey, projectConfig.Metadata.Template))
 	}
 
 	projectConfig.Path = filepath.Dir(projectPath)

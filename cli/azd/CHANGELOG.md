@@ -1,6 +1,108 @@
 # Release History
 
-## 0.3.0-beta.6 (Unreleased)
+## 0.5.0-beta.3 (2023-01-13)
+
+### Bugs Fixed
+
+- [[#1394]](https://github.com/Azure/azure-dev/pull/1394) Bug when running azd up with a template.
+
+## 0.5.0-beta.2 (2023-01-12)
+
+### Bugs Fixed
+
+- [[#1366]](https://github.com/Azure/azure-dev/issues/1366) Login not possible with personal account after upgrade to 0.5.0.
+
+## 0.5.0-beta.1 (2023-01-11)
+
+### Features Added
+
+- [[#1311]](https://github.com/Azure/azure-dev/pull/1311) Add support to install script with MSI on Windows.
+- [[#1312]](https://github.com/Azure/azure-dev/pull/1312) Allow users to configure service endpoints using `SERVICE_<service>_ENDPOINTS`.
+- [[#1323]](https://github.com/Azure/azure-dev/pull/1323) Add API Management Service support for all templates.
+- [[#1326]](https://github.com/Azure/azure-dev/pull/1326) Add purge support for API Management Service.
+- [[#1076]](https://github.com/Azure/azure-dev/pull/1076) Refactor the Bicep tool in azd to use the standalone API vs az command wrapper.
+- [[#1087]](https://github.com/Azure/azure-dev/pull/1087) Add NodeJs and Terraform devcontainer.
+- [[#965]](https://github.com/Azure/azure-dev/pull/965) Add UX style for `azd init`.
+- [[#1100]](https://github.com/Azure/azure-dev/pull/1100) Add Shell completion.
+- [[#1086]](https://github.com/Azure/azure-dev/pull/1086) Add FederatedIdentityCredentials (FICS).
+- [[#1177]](https://github.com/Azure/azure-dev/pull/1177) Add command `azd auth token`.
+- [[#1210]](https://github.com/Azure/azure-dev/pull/1210) Have azd acquire Bicep.
+- [[#1133]](https://github.com/Azure/azure-dev/pull/1133) Add UX style for `azd provision`.
+- [[#1248]](https://github.com/Azure/azure-dev/pull/1248) Support `redirect port` for `azd login`.
+- [[#1269]](https://github.com/Azure/azure-dev/pull/1269) Add UX style for `azd deploy`.
+
+### Breaking Changes
+
+- [[#1129]](https://github.com/Azure/azure-dev/pull/1129) Remove all dependencies on az cli. 
+- [[#1105]](https://github.com/Azure/azure-dev/pull/1105) `azd env new` now accepts the name of the environment as the first argument, i.e. `azd env new <environment>`. Previously, this behavior was accomplished via the global environment flag `-e`, i.e. `azd env new -e <environment>`.
+- [[#1022]](https://github.com/Azure/azure-dev/pull/1022) `azd` no longer uses the `az` CLI to authenticate with Azure by default. You will need to run `azd login` after upgrading. You may run `azd config set auth.useAzCliAuth true` to restore the old behavior of using `az` for authentication.
+
+### Bugs Fixed
+
+- [[#1107]](https://github.com/Azure/azure-dev/pull/1107) Fix Bicep path not found.
+- [[#1096]](https://github.com/Azure/azure-dev/pull/1096) Fix Java version check for major-only release.
+- [[#1105]](https://github.com/Azure/azure-dev/pull/1105) Fix `env new` to use positional argument.
+- [[#1168]](https://github.com/Azure/azure-dev/pull/1168) Fix purge option for command `azd down --force --purge` to purge key vaults and app configurations resources.
+
+If you have existing pipelines that use `azd`, you will need to update your pipelines to use the new `azd` login methods when authenticating against Azure.
+
+**GitHub Actions pipelines**:
+
+Update your `azure-dev.yml` to stop using the `azure/login@v1` action, and instead log in using `azd` directly. To do so, replace:
+
+```yaml
+- name: Log in with Azure
+  uses: azure/login@v1
+  with:
+    creds: ${{ secrets.AZURE_CREDENTIALS }}
+```
+
+with
+
+```yaml
+- name: Log in with Azure
+  run: |
+    $info = $Env:AZURE_CREDENTIALS | ConvertFrom-Json -AsHashtable;
+    Write-Host "::add-mask::$($info.clientSecret)"
+
+    azd login `
+      --client-id "$($info.clientId)" `
+      --client-secret "$($info.clientSecret)" `
+      --tenant-id "$($info.tenantId)"
+  shell: pwsh
+  env:
+    AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+```
+
+**Azure DevOps pipelines**:
+
+Update your `azure-dev.yml` file to force `azd` to use `az` for authentication.  To do so, add a new step before any other steps which use `azd`:
+
+```yaml
+- pwsh: |
+    azd config set auth.useAzCliAuth "true"
+  displayName: Configure azd to Use az CLI Authentication.
+```
+
+We plan to improve this behavior with [[#1126]](https://github.com/Azure/azure-dev/issues/1126).
+
+## 0.4.0-beta.1 (2022-11-02)
+
+### Features Added
+
+- [[#773]](https://github.com/Azure/azure-dev/pull/773) Add support for Java with Maven.
+- [[#1026]](https://github.com/Azure/azure-dev/pull/1026), [[#1021]](https://github.com/Azure/azure-dev/pull/1021) New official templates: ToDo with Java on App Service, ToDo with Java on Azure Container Apps, ToDo with C# on Azure Functions
+- [[#967]](https://github.com/Azure/azure-dev/pull/967) New `azd config` command for managing default subscription and location selections.
+- [[#1035]](https://github.com/Azure/azure-dev/pull/1035) Add terraform support for Azure Pipelines created using `azd pipeline config`.
+
+### Bugs Fixed
+
+- [[#1060]](https://github.com/Azure/azure-dev/pull/1060) Fix color rendering on Windows.
+- [[#1011]](https://github.com/Azure/azure-dev/pull/1011) Improve error printout for deployment failures.
+- [[#991]](https://github.com/Azure/azure-dev/pull/991) Fix `devcontainers.json` to use non-deprecated syntax.
+- [[#996]](https://github.com/Azure/azure-dev/pull/996) ToDo templates:
+  - Fix cases where provisioning of app settings would succeed, but app settings configuration would not take place.
+  - Move resource naming to `main.bicep` and remove `resources.bicep` from templates.
 
 ## 0.3.0-beta.5 (2022-10-26)
 

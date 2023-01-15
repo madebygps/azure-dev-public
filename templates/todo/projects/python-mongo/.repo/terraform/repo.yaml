@@ -51,6 +51,16 @@ repo:
         patterns:
           - "**/*.tf"
 
+      - from: ../../../../../../common/infra/terraform/core/gateway/apim
+        to: ./modules/apim
+        patterns:
+          - "**/*.tf"
+
+      - from: ../../../../../../common/infra/terraform/core/gateway/apim-api
+        to: ./modules/apim-api
+        patterns:
+          - "**/*.tf"
+
       - from: ../../api/python
         to: ./src/api
         patterns:
@@ -81,6 +91,11 @@ repo:
         patterns:
           - "README.md"
 
+      - from: ../../../../api/common/openapi.yaml
+        to: ../../../src/api/openapi.yaml
+        patterns:
+          - "apim-api.tf"
+
   assets:
     # Common assets
     - from: ./../../
@@ -109,6 +124,11 @@ repo:
         - .github/**/*
         - .devcontainer/**/*
         - "infra/**/*"
+        - .azdo/pipelines/*/azure-dev.yml
+
+    # AzDo workflows for bicep
+    - from: ../../../../../common/.azdo/pipelines/terraform/azure-dev.yml
+      to: ./.azdo/pipelines/azure-dev.yml
 
     # Github workflows for terraform
     - from: ../../../../../common/.github/workflows/terraform
@@ -135,6 +155,15 @@ repo:
     - from: ../../../../../common/infra/terraform/core/host/appservice/appservicepython
       to: ./infra/modules/appservicepython
 
+    - from: ../../../../../common/infra/shared/gateway/apim
+      to: ./infra/modules/apim-api
+
+    - from: ../../../../../common/infra/terraform/core/gateway/apim
+      to: ./infra/modules/apim
+
+    - from: ../../../../../common/infra/terraform/core/gateway/apim-api
+      to: ./infra/modules/apim-api
+
     # .devcontainer common (devcontainer.json)
     - from: ../../../../../common/.devcontainer/devcontainer.json/python/terraform
       to: ./.devcontainer
@@ -151,6 +180,10 @@ repo:
     - from: ../../../../common/tests
       to: ./tests
 
+    # Auth Python common
+    - from: ../../../../common/auth/py
+      to: ./src/api/todo
+      
     # Python API
     - from: ../../../../api/python
       to: ./src/api

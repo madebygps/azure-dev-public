@@ -5,15 +5,15 @@ package azcli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"github.com/azure/azure-dev/cli/azd/pkg/azure"
+	"github.com/azure/azure-dev/cli/azd/pkg/tools/internal"
 )
 
 func (cli *azCli) GetSubscriptionDeployment(
@@ -75,29 +75,23 @@ func (cli *azCli) createDeploymentsClient(
 }
 
 func (cli *azCli) DeployToSubscription(
-	ctx context.Context, subscriptionId, deploymentName string,
-	armTemplate *azure.ArmTemplate, parametersFile, location string) (
-	AzCliDeploymentResult, error) {
+	ctx context.Context,
+	subscriptionId, deploymentName string,
+	armTemplate azure.RawArmTemplate,
+	parameters azure.ArmParameters,
+	location string,
+) (AzCliDeploymentResult, error) {
 	deploymentClient, err := cli.createDeploymentsClient(ctx, subscriptionId)
 	if err != nil {
 		return AzCliDeploymentResult{}, fmt.Errorf("creating deployments client: %w", err)
-	}
-
-	templateJsonAsMap, err := readFromString([]byte(*armTemplate))
-	if err != nil {
-		return AzCliDeploymentResult{}, fmt.Errorf("reading template file: %w", err)
-	}
-	parametersFileJsonAsMap, err := readJson(parametersFile)
-	if err != nil {
-		return AzCliDeploymentResult{}, fmt.Errorf("reading parameters file: %w", err)
 	}
 
 	createFromTemplateOperation, err := deploymentClient.BeginCreateOrUpdateAtSubscriptionScope(
 		ctx, deploymentName,
 		armresources.Deployment{
 			Properties: &armresources.DeploymentProperties{
-				Template:   templateJsonAsMap,
-				Parameters: parametersFileJsonAsMap["parameters"],
+				Template:   armTemplate,
+				Parameters: parameters,
 				Mode:       to.Ptr(armresources.DeploymentModeIncremental),
 			},
 			Location: to.Ptr(location),
@@ -109,7 +103,11 @@ func (cli *azCli) DeployToSubscription(
 	// wait for deployment creation
 	deployResult, err := createFromTemplateOperation.PollUntilDone(ctx, nil)
 	if err != nil {
-		return AzCliDeploymentResult{}, fmt.Errorf("deploying to subscription: %w", err)
+		deploymentError := createDeploymentError(err)
+		return AzCliDeploymentResult{}, fmt.Errorf(
+			"deploying to subscription:\n\nDeployment Error Details:\n%w",
+			deploymentError,
+		)
 	}
 
 	return AzCliDeploymentResult{
@@ -120,29 +118,22 @@ func (cli *azCli) DeployToSubscription(
 }
 
 func (cli *azCli) DeployToResourceGroup(
-	ctx context.Context, subscriptionId, resourceGroup, deploymentName string,
-	armTemplate *azure.ArmTemplate, parametersFile string) (
-	AzCliDeploymentResult, error) {
+	ctx context.Context,
+	subscriptionId, resourceGroup, deploymentName string,
+	armTemplate azure.RawArmTemplate,
+	parameters azure.ArmParameters,
+) (AzCliDeploymentResult, error) {
 	deploymentClient, err := cli.createDeploymentsClient(ctx, subscriptionId)
 	if err != nil {
 		return AzCliDeploymentResult{}, fmt.Errorf("creating deployments client: %w", err)
-	}
-
-	templateJsonAsMap, err := readFromString([]byte(*armTemplate))
-	if err != nil {
-		return AzCliDeploymentResult{}, fmt.Errorf("reading template file: %w", err)
-	}
-	parametersFileJsonAsMap, err := readJson(parametersFile)
-	if err != nil {
-		return AzCliDeploymentResult{}, fmt.Errorf("reading parameters file: %w", err)
 	}
 
 	createFromTemplateOperation, err := deploymentClient.BeginCreateOrUpdate(
 		ctx, resourceGroup, deploymentName,
 		armresources.Deployment{
 			Properties: &armresources.DeploymentProperties{
-				Template:   templateJsonAsMap,
-				Parameters: parametersFileJsonAsMap["parameters"],
+				Template:   armTemplate,
+				Parameters: parameters,
 				Mode:       to.Ptr(armresources.DeploymentModeIncremental),
 			},
 		}, nil)
@@ -153,7 +144,11 @@ func (cli *azCli) DeployToResourceGroup(
 	// wait for deployment creation
 	deployResult, err := createFromTemplateOperation.PollUntilDone(ctx, nil)
 	if err != nil {
-		return AzCliDeploymentResult{}, fmt.Errorf("deploying to resource group: %w", err)
+		deploymentError := createDeploymentError(err)
+		return AzCliDeploymentResult{}, fmt.Errorf(
+			"deploying to resource group:\n\nDeployment Error Details:\n%w",
+			deploymentError,
+		)
 	}
 
 	return AzCliDeploymentResult{
@@ -183,23 +178,6 @@ func (cli *azCli) DeleteSubscriptionDeployment(ctx context.Context, subscription
 	return nil
 }
 
-func readJson(path string) (map[string]interface{}, error) {
-	templateFile, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return readFromString(templateFile)
-}
-
-func readFromString(jsonBytes []byte) (map[string]interface{}, error) {
-	template := make(map[string]interface{})
-	if err := json.Unmarshal(jsonBytes, &template); err != nil {
-		return nil, err
-	}
-
-	return template, nil
-}
-
 // convert from: sdk client outputs: interface{} to map[string]azcli.AzCliDeploymentOutput
 // sdk client parses http response from network as an interface{}
 // this function keeps the compatibility with the previous AzCliDeploymentOutput model
@@ -218,4 +196,21 @@ func CreateDeploymentOutput(rawOutputs interface{}) (result map[string]AzCliDepl
 		}
 	}
 	return result
+}
+
+// Attempts to create an Azure Deployment error from the HTTP response error
+func createDeploymentError(err error) error {
+	var responseErr *azcore.ResponseError
+	if errors.As(err, &responseErr) {
+		var errorText string
+		rawBody, err := io.ReadAll(responseErr.RawResponse.Body)
+		if err != nil {
+			errorText = responseErr.Error()
+		} else {
+			errorText = string(rawBody)
+		}
+		return internal.NewAzureDeploymentError(errorText)
+	}
+
+	return err
 }

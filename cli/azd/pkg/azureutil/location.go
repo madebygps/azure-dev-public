@@ -26,16 +26,38 @@ func (s Locs) Less(i, j int) bool {
 func (s Locs) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 
 // PromptLocation asks the user to select a location from a list of supported azure location
-func PromptLocation(ctx context.Context, env *environment.Environment, message string) (string, error) {
-	accountManager, err := account.NewManager(config.NewManager(), azcli.GetAzCli(ctx))
+func PromptLocation(
+	ctx context.Context, env *environment.Environment, message string, help string, console input.Console, azCli azcli.AzCli,
+) (string, error) {
+	return PromptLocationWithFilter(ctx, env, message, help, console, azCli, func(acl azcli.AzCliLocation) bool {
+		return true
+	})
+}
+
+func PromptLocationWithFilter(
+	ctx context.Context,
+	env *environment.Environment,
+	message string,
+	help string,
+	console input.Console,
+	azCli azcli.AzCli,
+	filter func(azcli.AzCliLocation) bool,
+) (string, error) {
+	accountManager, err := account.NewManager(config.NewManager(), azCli)
 	if err != nil {
 		return "", fmt.Errorf("failed creating account manager: %w", err)
 	}
-	console := input.GetConsole(ctx)
 
-	locations, err := accountManager.GetLocations(ctx, env.GetSubscriptionId())
+	allLocations, err := accountManager.GetLocations(ctx, env.GetSubscriptionId())
 	if err != nil {
 		return "", fmt.Errorf("listing locations: %w", err)
+	}
+
+	locations := make([]azcli.AzCliLocation, 0, len(allLocations))
+	for _, location := range allLocations {
+		if filter(location) {
+			locations = append(locations, location)
+		}
 	}
 
 	sort.Sort(Locs(locations))
@@ -46,7 +68,11 @@ func PromptLocation(ctx context.Context, env *environment.Environment, message s
 
 	// If no location is set in the process environment, see what the azd config default is.
 	if defaultLocation == "" {
-		defaultConfig := accountManager.GetAccountDefaults(ctx)
+		defaultConfig, err := accountManager.GetAccountDefaults(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed retrieving azd defaults. %w", err)
+		}
+
 		defaultLocation = defaultConfig.DefaultLocation.Name
 	}
 
@@ -64,6 +90,7 @@ func PromptLocation(ctx context.Context, env *environment.Environment, message s
 
 	selectedIndex, err := console.Select(ctx, input.ConsoleOptions{
 		Message:      message,
+		Help:         help,
 		Options:      locationOptions,
 		DefaultValue: defaultOption,
 	})
